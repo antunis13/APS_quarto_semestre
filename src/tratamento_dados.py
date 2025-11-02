@@ -53,14 +53,7 @@ def abrir_arquivos_csv():
 
     arquivos_csv = ordenar_lista(lista=arquivos_csv)
 
-    for arquivo in arquivos_csv:
-
-        df = pd.read_csv(filepath_or_buffer=f'{path}/{arquivo}')
-
-        for values in df.iterrows():
-            print(values)
-        
-        print()
+    return arquivos_csv
 
 
 if __name__ == '__main__':
