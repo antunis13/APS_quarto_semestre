@@ -1,40 +1,49 @@
 import os
-import pandas as pd
-import numpy as np
-from multiprocessing import Process, Queue, cpu_count
-from typing import List
 import logging
 from time import sleep
+from typing import List
+from multiprocessing import Process, Queue, cpu_count
 
+import numpy as np
+import pandas as pd
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class DBQueimadasProcessor:
+class Tratando_Dados:
     """Processador de dados do DBQueimadas com multiprocessing"""
     
-    def __init__(self, csv_files: List[str], num_processes: int = None):
+    def __init__(self, num_processes: int = None):
         """
         Args:
-            csv_files: Lista de caminhos dos arquivos CSV
             num_processes: Número de processos (padrão: número de CPUs)
         """
-        self.processos_finalizados = 0
-        self.dados_coletados = []
-        self.processes = []
-        self.csv_files = csv_files
-        self.num_processes = num_processes or cpu_count()
-        self.data_queue = Queue()
-        self.processos_ativos = 0
         
-    def validar_linha(self, row: pd.Series) -> bool:
+        # Criar lista com os nomes do arquivos CSV que seram tratados.
+        self.csv_files = self._abrir_arquivos_csv()
+        
+        # Cria a Queue que será utilizada para fazer o redirecionamento de dados que atendem as validações para uma lista.
+        self.data_queue = Queue()
+
+        # Variaveis utilizadas para controlar a quantidade de processos ativos, finalizados e dados coletados através do processos rodando ou rodados.
+        self.processos_finalizados = 0
+        self.processos_ativos = 0
+        self.processes = []
+        self.dados_coletados = []
+
+        # Se não for passo o número de processos que será utilizado para a atrativa dos dados irá ser utilizado uma função do python que verifica 
+        # o número total de núcleos (cores) físicos + lógicos disponíveis no seu processador. Ela é usada para saber quantos processos podem rodar
+        # em paralelo de forma eficiente.
+        self.num_processes = num_processes or cpu_count()
+        
+    def _validar_linha(self, row: pd.Series) -> bool:
         """
         Valida cada linha do CSV
         Customize esta função com suas regras de validação
         
-        Campos:
+        Campos CSV:
 
                 DataHora    
                 Satelite    
@@ -83,7 +92,7 @@ class DBQueimadasProcessor:
             logger.warning(f"Erro na validação: {e}")
             return False
     
-    def processar_arquivo(self, csv_file: str, queue: Queue):
+    def _processar_arquivo(self, csv_file: str, queue: Queue):
         """
         Processa um arquivo CSV e envia linhas válidas para a queue
         """
@@ -93,13 +102,13 @@ class DBQueimadasProcessor:
             path = os.getcwd() + '/dbqueimadas_CSV'
 
             # Ler CSV em chunks para economizar memória
-            chunk_size = 10000
+            chunk_size = 1000
             linhas_validas = 0
             linhas_invalidas = 0
             
             for chunk in pd.read_csv(f'{path}/{csv_file}', chunksize=chunk_size, low_memory=False):
                 for idx, row in chunk.iterrows():
-                    if self.validar_linha(row):
+                    if self._validar_linha(row):
                         # Enviar linha válida para a queue
 
                         row['DataHora'] = pd.to_datetime(row['DataHora'])
@@ -114,8 +123,8 @@ class DBQueimadasProcessor:
         except Exception as e:
             logger.error(f"Erro ao processar {csv_file}: {e}")
         
-        
-    def engenharia_features(self, df: pd.DataFrame) -> pd.DataFrame:
+
+    def _engenharia_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Aplica engenharia de features nos dados
         """
@@ -155,7 +164,7 @@ class DBQueimadasProcessor:
             )
         
         # 4. Encoding de variáveis categóricas (Strings)
-        # Essa engenha de Featuresé feita por que o modelo não entende 'baixo', 'muito baixo' etc...
+        # Essa engenharia de Features é feita por que o modelo não entende 'baixo', 'muito baixo' etc...
         # Então transformamos essas categorias em números para que o modelo possa interpretá-los corretamente.
         categorical_cols = df_features.select_dtypes(include=['object']).columns
         for col in categorical_cols:
@@ -165,93 +174,86 @@ class DBQueimadasProcessor:
         logger.info(f"Features criadas. Shape final: {df_features.shape}")
         return df_features
     
-    def agregar_dados(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _agregar_dados(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Realiza agregações nos dados
         """
-        logger.info("Realizando agregações...")
+        logger.info("Agregando por data (diário) para Amazônia...")
+
+        df = df.copy()
+
+        df['data'] = df['DataHora'].dt.floor('D')
+
+        agg_dict = {}
+        if 'FRP' in df.columns:
+            agg_dict['FRP'] = ['count', 'sum']
+        if 'Precipitacao' in df.columns:
+            agg_dict['Precipitacao'] = ['mean', 'sum']
+        if 'DiaSemChuva' in df.columns:
+            agg_dict['DiaSemChuva'] = ['mean']
+        if 'Latitude' in df.columns:
+            agg_dict['Latitude'] = ['mean']
+        if 'Longitude' in df.columns:
+            agg_dict['Longitude'] = ['mean']
+
+        if not agg_dict:
+            logger.warning("Nenhuma coluna encontrada para agregação.")
+            return df
+
+        out = (
+            df.groupby(['data'])
+            .agg(agg_dict)
+            .reset_index()
+        )
+
+        out.columns = ['_'.join(col).strip('_') for col in out.columns.values]
+
+        if 'FRP_count' in out.columns:
+            out = out.rename(columns={'FRP_count': 'focos_count'})
         
-        # Exemplo de agregações - AJUSTE CONFORME NECESSÁRIO
-        
-        # Agregação por região e período
-        if all(col in df.columns for col in ['regiao', 'ano', 'mes']):
-            agg_dict = {
-                'frp': ['mean', 'max', 'min', 'std', 'count'] if 'frp' in df.columns else ['count'],
-                'lat': ['mean'],
-                'lon': ['mean']
-            }
-            
-            df_agregado = df.groupby(['regiao', 'ano', 'mes']).agg(agg_dict).reset_index()
-            df_agregado.columns = ['_'.join(col).strip('_') for col in df_agregado.columns.values]
-            
-            logger.info(f"Dados agregados. Shape: {df_agregado.shape}")
-            return df_agregado
-        
-        return df
+        return out
 
     
-    def processos(self): 
-        while self.processos_finalizados < len(self.csv_files):
-            # Verificar se há dados na queue
-            if not self.data_queue.empty():
-                self.dados_coletados.append(self.data_queue.get())
-            
-            processos_vivos = sum(1 for p in self.processes if p.is_alive())
-
-            if processos_vivos < self.processos_ativos:
-                # Calcular quantos terminaram
-                finalizados = self.processos_ativos - processos_vivos
-                self.processos_finalizados += finalizados
-                self.processos_ativos = processos_vivos
-
-            sleep(0.5)
-
-        # Coletar dados restantes na queue
-        while not self.data_queue.empty():
-            self.dados_coletados.append(self.data_queue.get())
-        
-        # Aguardar todos os processos terminarem
-        for p in self.processes:
-            p.join()
-        
-        logger.info(f"Total de linhas válidas coletadas: {len(self.dados_coletados)}")
-
-
-    def processar_todos(self, aplicar_agregacao: bool = False) -> pd.DataFrame:
+    def processar_todos(self) -> pd.DataFrame:
         """
         Processa todos os arquivos CSV com multiprocessing
         """
         logger.info(f"Iniciando processamento com {self.num_processes} processos")
-
-        # Criar wrapper para o método processos
-        def _wrapper_processos(obj):
-            obj.processos()
-        
-        pool_process = Process(target=_wrapper_processos, args=(self,))
-        pool_process.start()
-
-        # Criar processos para cada arquivo
         total_arquivos = len(self.csv_files)
-        proximo_arquivo = 0  # ← ADICIONADO
+        proximo_arquivo = 0
 
         while self.processos_finalizados < total_arquivos:
-            # Verificar se pode criar novo processo
-            if (self.processos_ativos < self.num_processes and
-                proximo_arquivo < total_arquivos):
-
-                p = Process(
-                    target=self.processar_arquivo, 
-                    args=(self.csv_files[proximo_arquivo], self.data_queue)
-                )
+            
+            if self.processos_ativos < self.num_processes and proximo_arquivo < total_arquivos:
+                p = Process(target=self._processar_arquivo, args=(self.csv_files[proximo_arquivo], self.data_queue))
                 p.start()
                 self.processes.append(p)
-
                 self.processos_ativos += 1
                 proximo_arquivo += 1
 
-            sleep(0.5)
-        
-        pool_process.join()
+            while not self.data_queue.empty():
+                self.dados_coletados.append(self.data_queue.get())
+
+            for p in self.processes:
+                # O atributo .exitcode de um processo no Python (multiprocessing.Process) mostra o código de saída do processo filho depois que ele termina. 
+                # Ele serve para saber se o processo ainda está rodando, se terminou com sucesso ou se deu erro.
+                # Vamos utilizar ele para verificar se o processo já terminou para que seja possivel adicionar mais um processo se houver mais arquivos
+                # CSV para ser tratados
+                if p.exitcode is not None:
+                    p.join()              
+
+                    self.processes.remove(p)
+                    self.processos_finalizados += 1
+
+            self.processos_ativos = len(self.processes)
+
+            sleep(0.3)
+
+        # Aqui fazemos uma simples verificação se ficou mais alguma coisa na Queue antes de passar para o próximo passo da tratativa dos dados.
+        while not self.data_queue.empty():
+            self.dados_coletados.append(self.data_queue.get())
+
+        logger.info(f"Total de linhas válidas coletadas: {len(self.dados_coletados)}")
 
         # Criar DataFrame
         df = pd.DataFrame(self.dados_coletados)
@@ -260,11 +262,57 @@ class DBQueimadasProcessor:
             logger.warning("Nenhum dado válido foi coletado!")
             return pd.DataFrame()
         
+        # Aplicar agregação
+        df = self._agregar_dados(df)
+ 
         # Aplicar engenharia de features
-        df = self.engenharia_features(df)
-        
-        # Aplicar agregação se solicitado
-        if aplicar_agregacao:
-            df = self.agregar_dados(df)
+        df = self._engenharia_features(df)       
         
         return df
+
+
+    def _ordenar_lista(self, lista: list) -> List[str]:
+
+        lista_ordenada = list()
+
+        for valor in (lista):
+
+            valor =  int(valor[6:10])
+
+            if not lista_ordenada:
+                lista_ordenada.append(valor)
+                continue
+
+            if valor < 0:
+                lista_ordenada.insert(0, valor)
+            else:
+                for index, valor_lista_ordenada in enumerate(lista_ordenada):
+                    if (index+1) < len(lista_ordenada):
+                        if index == 0 and valor < valor_lista_ordenada:
+                            lista_ordenada.insert(0, valor)
+                            break
+                        elif valor > valor_lista_ordenada and valor < lista_ordenada[index+1]:
+                            lista_ordenada.insert(index+1, valor)
+                            break
+                        
+                    else:
+                        lista_ordenada.append(valor)
+                        break
+        
+        lista.clear()
+
+        for index, valor in enumerate(lista_ordenada):
+            del lista_ordenada[index]
+            lista_ordenada.insert(index, f'dados_{valor}.csv')
+
+        return lista_ordenada
+
+
+    def _abrir_arquivos_csv(self) -> List[str]:
+        path = os.getcwd() + '/dbqueimadas_CSV'
+
+        arquivos_csv = os.listdir(path=path)
+
+        arquivos_csv = self._ordenar_lista(lista=arquivos_csv)
+
+        return arquivos_csv
