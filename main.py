@@ -1,13 +1,14 @@
-from src.tratamento_dados import abrir_arquivos_csv
-from src.fila import DBQueimadasProcessor
+from src.tratando_dados import Tratando_Dados
+
+import os
+
 
 if __name__ == '__main__':
 
-    csv_files = abrir_arquivos_csv()
-
-    # csv_files = ['dados_2020.csv']
-
-    processor = DBQueimadasProcessor(csv_files, num_processes=2)
+    processor = Tratando_Dados(num_processes=2)
     
-    # 3. Processar dados
-    df_final = processor.processar_todos(aplicar_agregacao=False)
+    df_final = processor.processar_todos()
+
+    path = os.getcwd() + '/dbqueimadas_CSV'
+
+    df_final.to_csv(path+'/df_final.csv', index=False)
