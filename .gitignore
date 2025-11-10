@@ -5,6 +5,8 @@ __pycache__/
 
 # Project
 dbqueimadas_CSV/
+modelo_RF.jkl
+validacao_com_medias.png
 
 # C extensions
 *.so

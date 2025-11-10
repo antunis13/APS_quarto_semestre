@@ -1,10 +1,9 @@
 import os
 import logging
-from time import sleep
+import numpy as np
 from typing import List
 from multiprocessing import Process, Queue, cpu_count
 
-import numpy as np
 import pandas as pd
 
 # Configurar logging
@@ -30,59 +29,68 @@ class Tratando_Dados:
         # Variaveis utilizadas para controlar a quantidade de processos ativos, finalizados e dados coletados através do processos rodando ou rodados.
         self.processos_finalizados = 0
         self.processos_ativos = 0
-        self.processes = []
+        self.processes = [] # processos_em_execucao
         self.dados_coletados = []
 
         # Se não for passo o número de processos que será utilizado para a atrativa dos dados irá ser utilizado uma função do python que verifica 
         # o número total de núcleos (cores) físicos + lógicos disponíveis no seu processador. Ela é usada para saber quantos processos podem rodar
         # em paralelo de forma eficiente.
-        self.num_processes = num_processes or cpu_count()
+        self.num_processes = num_processes if num_processes else cpu_count()//2
         
     def _validar_linha(self, row: pd.Series) -> bool:
         """
-        Valida cada linha do CSV
-        Customize esta função com suas regras de validação
-        
-        Campos CSV:
+        Valida linhas do arquivo CSV.
 
-                DataHora    
-                Satelite    
-                Pais        
-                Estado      
-                Municipio   
-                Bioma       
-                DiaSemChuva 
-                Precipitacao
-                RiscoFogo   
-                FRP         
-                Latitude    
-                Longitude   
+        Colunas CSV:
 
+            DataHora    
+            Satelite    
+            Pais        
+            Estado      
+            Municipio   
+            Bioma       
+            DiaSemChuva 
+            Precipitacao
+            RiscoFogo   
+            FRP         
+            Latitude    
+            Longitude   
+
+        Args:
+            row (pd.Series): Linha do DataFreme
+
+        Returns:
+            bool: Se ele entregar em alguma condição o retorno é False, ou seja, não pode ser utilizado a row
+            que entrou na função, se ele não atender a nenhuma condição ele retorna True, ou seja, a row
+            que entrou na função pode ser utilizada.
         """
         try:
-            # Exemplo de validações - AJUSTE CONFORME SEUS DADOS
-            
-            # 1. Verificar se campos obrigatórios não são nulos
+
+            # Verificar se o campo ´FRP´ é NaN
+            if pd.isna(row['FRP']):
+                return False
+
+            # Verificar se campos obrigatórios não são nulos
             campos_obrigatorios = ['Latitude', 'Longitude', 'DataHora', 'Satelite']
             if row[campos_obrigatorios].isnull().any():
                 return False
             
-            # 2. Validar se a linha se fere ao Brasil (Amazônia)
+            # Validar se a linha se fere ao Brasil (Amazônia)
             if not row['Pais'] == 'Brasil':
                 return False
             
-            # 3. Validar FRP (Fire Radiative Power) se existir
+            # Validar FRP (Fire Radiative Power) se existir
             if pd.notna(row['FRP']):
-                if row['FRP'] < 0 or row['FRP'] > 10000:
+                if row['FRP'] < 0:
                     return False
             
-            # 4. Validar data
+            # Validar data
             try:
                 pd.to_datetime(row['DataHora'])
             except:
-                return False            
+                return False
             
-            # 5. Validar Bioma
+            # Validar Bioma
             if not row['Bioma'] == 'Amazônia':
                 return False
 
@@ -94,7 +102,14 @@ class Tratando_Dados:
     
     def _processar_arquivo(self, csv_file: str, queue: Queue):
         """
-        Processa um arquivo CSV e envia linhas válidas para a queue
+            Está função é utilizada para abrir um arquivo CSV por partes para que a tartativa dos dados aconteça mais rapidamente.
+            A quantidade de linhas carregadas por vez é determinada na variável ´chunk_size´, com isso é feito a iteração pelas linhas,
+            essas linhas são passadas para uma função que vai fazer algumas validações, se passar por todas ela retorna True se não False.
+            Se o resultado por True ele adiciona o valor a Fila se não ele vai para a próxima linha.
+
+        Args:
+            csv_file (str): path do arquivo csv que será tratado.
+            queue (Queue): Fila que será utilizado para colocar os dados que atendem aos requisitos.
         """
         try:
             logger.info(f"Processando arquivo: {csv_file}")
@@ -109,9 +124,11 @@ class Tratando_Dados:
             for chunk in pd.read_csv(f'{path}/{csv_file}', chunksize=chunk_size, low_memory=False):
                 for idx, row in chunk.iterrows():
                     if self._validar_linha(row):
+                        
                         # Enviar linha válida para a queue
-
                         row['DataHora'] = pd.to_datetime(row['DataHora'])
+
+                        row = self._codigos_municipio(row=row)
 
                         queue.put(row.to_dict())
                         linhas_validas += 1
@@ -122,103 +139,178 @@ class Tratando_Dados:
             
         except Exception as e:
             logger.error(f"Erro ao processar {csv_file}: {e}")
-        
+
 
     def _engenharia_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Aplica engenharia de features nos dados
+            Está função é utilizada para criar as features com base nas colunas do DataFreme original,
+            essas features são criadas para que o modelo tenha mais conhecimento sobre os dados e ele
+            consiga predizer o dado determiando como target de uma forma mais eficiente.
+
+        Args:
+            df (pd.DataFrame): DataFreme que será utilizado para criar as features.
+
+        Returns:
+            pd.DataFrame: DataFreme com as features criadas.
         """
-        logger.info("Aplicando engenharia de features...")
-        
-        df_features = df.copy()
-        
-        # 1. Features temporais
-        if 'DataHora' in df_features.columns:
-            df_features['ano'] = df_features['DataHora'].dt.year
-            df_features['mes'] = df_features['DataHora'].dt.month
-            df_features['dia'] = df_features['DataHora'].dt.day
-            df_features['dia_semana'] = df_features['DataHora'].dt.dayofweek
-            df_features['hora'] = df_features['DataHora'].dt.hour
-            df_features['dia_ano'] = df_features['DataHora'].dt.dayofyear
-
-
-        # 2. Features geográficas
-        if 'Latitude' in df_features.columns and 'Latitude' in df_features.columns:
-            # Região aproximada
-            df_features['regiao'] = df_features.apply(lambda row:
-                    'norte' if row['Latitude'] >= -10 and row['Longitude'] <= -50 else
-                    'nordeste' if row['Latitude'] >= -15 and row['Longitude'] > -50 else
-                    'centro_oeste' if -20 <= row['Latitude'] < -10 and -60 <= row['Longitude'] <= -45 else
-                    'sudeste' if -25 <= row['Latitude'] < -15 and -50 <= row['Longitude'] <= -39 else
-                    'sul',
-                    axis=1
-                )
-        
-        # 3. Features de FRP (Fire Radiative Power)
-        if 'FRP' in df_features.columns:
-            df_features['frp_log'] = np.log1p(df_features['FRP'])
-            df_features['frp_categoria'] = pd.cut(
-                df_features['FRP'], 
-                bins=[0, 10, 50, 100, 500, float('inf')],
-                labels=['muito_baixo', 'baixo', 'medio', 'alto', 'muito_alto']
-            )
-        
-        # 4. Encoding de variáveis categóricas (Strings)
-        # Essa engenharia de Features é feita por que o modelo não entende 'baixo', 'muito baixo' etc...
-        # Então transformamos essas categorias em números para que o modelo possa interpretá-los corretamente.
-        categorical_cols = df_features.select_dtypes(include=['object']).columns
-        for col in categorical_cols:
-            if col != 'DataHora':
-                df_features[col] = df_features[col].astype('category').cat.codes
-        
-        logger.info(f"Features criadas. Shape final: {df_features.shape}")
-        return df_features
     
-    def _agregar_dados(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Realiza agregações nos dados
-        """
-        logger.info("Agregando por data (diário) para Amazônia...")
-
+        logger.info("Aplicando engenharia de features...")
         df = df.copy()
 
-        df['data'] = df['DataHora'].dt.floor('D')
+        df['Data'] = pd.to_datetime(df['Data'])
 
-        agg_dict = {}
-        if 'FRP' in df.columns:
-            agg_dict['FRP'] = ['count', 'sum']
-        if 'Precipitacao' in df.columns:
-            agg_dict['Precipitacao'] = ['mean', 'sum']
-        if 'DiaSemChuva' in df.columns:
-            agg_dict['DiaSemChuva'] = ['mean']
-        if 'Latitude' in df.columns:
-            agg_dict['Latitude'] = ['mean']
-        if 'Longitude' in df.columns:
-            agg_dict['Longitude'] = ['mean']
+        # ===== FEATURES TEMPORAIS =====
+        df['Ano'] = df['Data'].dt.year
+        df['Mes'] = df['Data'].dt.month
+        df['Dia'] = df['Data'].dt.day
+        df['DiaAno'] = df['Data'].dt.dayofyear
 
-        if not agg_dict:
-            logger.warning("Nenhuma coluna encontrada para agregação.")
-            return df
+        # ===== FEATURES LÓGICAS =====
+        # Nós criamos essas features para que o modelo entenda que os valores 'Dia' e 'Mes'
+        # não são valores continuos, eles tem uma lógica por trás. 
+        # A forma com que implementamos isso é como se criassemos um relógio onde cada valor 
+        # tem sua posição dentro dele e toda vez que o ultimo valor do relógio é atingido
+        # o ciclo se reinicia e volta para o valor inicial.
+        # Criamos essa features por que se mantivessemos as features somente como 'Dia' e 'Mes'
+        # o modelo iria entender esses valores como valores continuos, mas na verdade não são.
+        df['Mes_sin'] = np.sin(2 * np.pi * df['Mes'] / 12)
+        df['Mes_cos'] = np.cos(2 * np.pi * df['Mes'] / 12)
+        df['DiaAno_sin'] = np.sin(2 * np.pi * df['DiaAno'] / 365)
+        df['DiaAno_cos'] = np.cos(2 * np.pi * df['DiaAno'] / 365)
 
-        out = (
-            df.groupby(['data'])
-            .agg(agg_dict)
-            .reset_index()
-        )
+        # ===== FEATURES DE INTERAÇÃO =====
+        # Essa feature é importante para determinar o Risco das queimadas, ou seja, se estiver tendo fogo e chuva 
+        # o perigo não é tão alto, agora se estiver com Risco de Fogo e não estiver chovendo o perigo é grande.
+        # Então seria uma forma de entender qual o Risco da queimada que está ou irá acontecer.
+        df['RiscoFogo_x_DiaSemChuva'] = df['RiscoFogo'] * df['DiaSemChuva']
 
-        out.columns = ['_'.join(col).strip('_') for col in out.columns.values]
+        # ===== FEATURES EXPANÇÃO POLINOMIAL =====
+        # Utilizamos o conceito de expansão polinomial para entendermos a não linearidade dos dados e o modelo 
+        # conseguir predizer de uma forma mais acertiva.
+        df['RiscoFogo_squared'] = df['RiscoFogo'] ** 2
+        df['DiaSemChuva_squared'] = df['DiaSemChuva'] ** 2
 
-        if 'FRP_count' in out.columns:
-            out = out.rename(columns={'FRP_count': 'focos_count'})
+        # ===== FEATURES GEOGRÁFICAS NORMALIZADAS =====
+        # Aqui normalizamos a Latitude e Longitude para igualar a importância numérica, assim o modelo não entende que 
+        # a Latitude e Longitude tem mais importância do que os demais parametros.
+        df['Latitude_norm'] = (df['Latitude'] - df['Latitude'].min()) / (df['Latitude'].max() - df['Latitude'].min())
+        df['Longitude_norm'] = (df['Longitude'] - df['Longitude'].min()) / (df['Longitude'].max() - df['Longitude'].min())
         
-        return out
-
+        # ===== FEATURES DE MÉDIA MÓVEL =====
+        df['RiscoFogo_media_movel_7'] = df.groupby('Municipio')['RiscoFogo'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).mean()
+        )
+        df['Precipitacao_media_movel_7'] = df.groupby('Municipio')['Precipitacao'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).mean()
+        )
+        df['DiaSemChuva_media_movel_14'] = df.groupby('Municipio')['DiaSemChuva'].transform(
+            lambda x: x.rolling(window=14, min_periods=1).mean()
+        )
+        
+        # ===== FEATURES DE VOLATILIDADE =====
+        df['RiscoFogo_volatilidade_7'] = df.groupby('Municipio')['RiscoFogo'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).std().fillna(0)
+        )
+        df['Precipitacao_volatilidade_7'] = df.groupby('Municipio')['Precipitacao'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).std().fillna(0)
+        )
+        
+        # ===== FEATURES DE EXTREMOS =====
+        df['RiscoFogo_max_14'] = df.groupby('Municipio')['RiscoFogo'].transform(
+            lambda x: x.rolling(window=14, min_periods=1).max()
+        )
+        df['Precipitacao_min_7'] = df.groupby('Municipio')['Precipitacao'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).min()
+        )
+        
+        # ===== FEATURES DE ACUMULAÇÃO =====
+        df['Precipitacao_acumulada_7'] = df.groupby('Municipio')['Precipitacao'].transform(
+            lambda x: x.rolling(window=7, min_periods=1).sum()
+        )
+        df['Precipitacao_acumulada_30'] = df.groupby('Municipio')['Precipitacao'].transform(
+            lambda x: x.rolling(window=30, min_periods=1).sum()
+        )
+        
+        logger.info(f"✓ Features avançadas criadas com sucesso! Total: {df.shape[1]}")
+        
+        return df
     
+    def _agregar_por_dia_municipio(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+            Nesta função será feito a agregação dos dados apartir de dia por data e municipio, ou seja, 
+            para cada dia que o datafreme tem ele vai separar as linhas de um unico dia e municipio e efetuar
+            alguns calculos que são passados na função: agg.
+
+        Args:
+            df (pd.DataFrame): DataFreme onde será feito a agregação dos dados.
+
+        Returns:
+            pd.DataFrame: DataFreme com os dados agregados.
+        """
+        df = df.copy()
+        df['DataHora'] = pd.to_datetime(df['DataHora'])
+        df['Data'] = df['DataHora'].dt.date
+
+        df_daily = df.groupby(['Data', 'Municipio']).agg({
+            'FRP': 'sum',
+            
+            # Para RiscoFogo: média apenas dos valores válidos
+            'RiscoFogo': lambda x: x[x != -999.0].mean(),
+            
+            # Para DiaSemChuva: máximo apenas dos valores válidos
+            'DiaSemChuva': lambda x: x[x != -999.0].max(),
+            
+            # Para Precipitacao: média apenas dos valores válidos
+            'Precipitacao': lambda x: x[x != -999.0].mean(),
+            
+            'Latitude': 'mean',
+            'Longitude': 'mean'
+        }).reset_index()
+
+        df_daily = df_daily.dropna()
+
+        df['Data'] = pd.to_datetime(df['Data'])
+
+        return df_daily
+    
+    def _criar_categorias_risco(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Cria categorias de risco baseado em FRP.
+        Baixo: FRP < 100
+        Médio: 100 <= FRP < 500
+        Alto: FRP >= 500
+        """
+        df = df.copy()
+        
+        def categorizar_frp(frp):
+            if frp < 100:
+                return 'Baixo'
+            elif frp < 500:
+                return 'Médio'
+            else:
+                return 'Alto'
+        
+        df['Categoria_Risco'] = df['FRP'].apply(categorizar_frp)
+        
+        print("\n" + "="*60)
+        print("DISTRIBUIÇÃO DE CATEGORIAS")
+        print("="*60)
+        print(df['Categoria_Risco'].value_counts())
+        print("="*60 + "\n")
+        
+        return df
+
     def processar_todos(self) -> pd.DataFrame:
         """
-        Processa todos os arquivos CSV com multiprocessing
+            Essa é a função principal da class, é onde será tratado todos os dados para gerar um arquivo CSV final
+            que será utilizado para criar o modelo de ML.
+
+        Returns:
+            pd.DataFrame: DataFreme com os dados tratados.
         """
+
         logger.info(f"Iniciando processamento com {self.num_processes} processos")
+        
         total_arquivos = len(self.csv_files)
         proximo_arquivo = 0
 
@@ -231,7 +323,7 @@ class Tratando_Dados:
                 self.processos_ativos += 1
                 proximo_arquivo += 1
 
-            while not self.data_queue.empty():
+            if not self.data_queue.empty():
                 self.dados_coletados.append(self.data_queue.get())
 
             for p in self.processes:
@@ -240,18 +332,13 @@ class Tratando_Dados:
                 # Vamos utilizar ele para verificar se o processo já terminou para que seja possivel adicionar mais um processo se houver mais arquivos
                 # CSV para ser tratados
                 if p.exitcode is not None:
-                    p.join()              
+                    p.join()
 
                     self.processes.remove(p)
                     self.processos_finalizados += 1
 
             self.processos_ativos = len(self.processes)
 
-            sleep(0.3)
-
-        # Aqui fazemos uma simples verificação se ficou mais alguma coisa na Queue antes de passar para o próximo passo da tratativa dos dados.
-        while not self.data_queue.empty():
-            self.dados_coletados.append(self.data_queue.get())
 
         logger.info(f"Total de linhas válidas coletadas: {len(self.dados_coletados)}")
 
@@ -262,12 +349,15 @@ class Tratando_Dados:
             logger.warning("Nenhum dado válido foi coletado!")
             return pd.DataFrame()
         
-        # Aplicar agregação
-        df = self._agregar_dados(df)
- 
-        # Aplicar engenharia de features
-        df = self._engenharia_features(df)       
-        
+        # Agregar
+        df = self._agregar_por_dia_municipio(df=df)
+
+        # Criar categorias
+        df = self._criar_categorias_risco(df=df)
+
+        # Engenharia de features
+        df = self._engenharia_features(df=df)
+
         return df
 
 
@@ -276,8 +366,11 @@ class Tratando_Dados:
         lista_ordenada = list()
 
         for valor in (lista):
-
-            valor =  int(valor[6:10])
+            try:
+                valor =  int(valor[6:10])
+            except ValueError:
+                logger.error(f"Erro ao carregar o CSV: {valor}")
+                continue
 
             if not lista_ordenada:
                 lista_ordenada.append(valor)
@@ -316,3 +409,74 @@ class Tratando_Dados:
         arquivos_csv = self._ordenar_lista(lista=arquivos_csv)
 
         return arquivos_csv
+
+    def _codigos_municipio(self, row: pd.Series) -> pd.Series:
+        municipios = {
+            'Alvarães': 1300029,
+            'Amaturá': 1300060,
+            'Anamã': 1300086,
+            'Anori': 1300102,
+            'Apuí': 1300144,
+            'Atalaia Do Norte': 1300201,
+            'Autazes': 1300300,
+            'Barcelos': 1300409,
+            'Barreirinha': 1300508,
+            'Benjamin Constant': 1300607,
+            'Beruri': 1300631,
+            'Boa Vista Do Ramos': 1300680,
+            'Boca Do Acre': 1300706,
+            'Borba': 1300805,
+            'Caapiranga': 1300839,
+            'Canutama': 1300904,
+            'Carauari': 1301001,
+            'Careiro': 1301100,
+            'Careiro Da Várzea': 1301159,
+            'Coari': 1301209,
+            'Codajás': 1301308,
+            'Eirunepé': 1301407,
+            'Envira': 1301506,
+            'Fonte Boa': 1301605,
+            'Guajará': 1301654,
+            'Humaitá': 1301704,
+            'Ipixuna': 1301803,
+            'Iranduba': 1301852,
+            'Itacoatiara': 1301902,
+            'Itamarati': 1301951,
+            'Itapiranga': 1302009,
+            'Japurá': 1302108,
+            'Juruá': 1302207,
+            'Jutaí': 1302306,
+            'Lábrea': 1302405,
+            'Manacapuru': 1302504,
+            'Manaquiri': 1302553,
+            'Manaus': 1302603,
+            'Manicoré': 1302702,
+            'Maraã': 1302801,
+            'Maués': 1302900,
+            'Nhamundá': 1303007,
+            'Nova Olinda Do Norte': 1303106,
+            'Novo Airão': 1303205,
+            'Novo Aripuanã': 1303304,
+            'Parintins': 1303403,
+            'Pauini': 1303502,
+            'Presidente Figueiredo': 1303536,
+            'Rio Preto Da Eva': 1303569,
+            'Santa Isabel Do Rio Negro': 1303601,
+            'Santo Antônio Do Içá': 1303700,
+            'São Gabriel Da Cachoeira': 1303809,
+            'São Paulo De Olivença': 1303908,
+            'São Sebastião Do Uatumã': 1303957,
+            'Silves': 1304005,
+            'Tabatinga': 1304062,
+            'Tapauá': 1304104,
+            'Tefé': 1304203,
+            'Tonantins': 1304237,
+            'Uarini': 1304260,
+            'Urucará': 1304302,
+            'Urucurituba': 1304401,
+        }
+
+        row['Municipio'] = municipios[row['Municipio'].title()]
+
+        return row
+    
