@@ -1,14 +1,10 @@
 import streamlit as st
 import pandas as pd
 
-
 data = {
     "Ano": [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
     "Focos_de_Queimada": [21500, 18200, 19800, 23400, 29700, 42300, 38200, 35500, 40100, 37600, 34800]
 }
-
-import pandas as pd
-import streamlit as st
 
 # Dados fictícios de focos de queimadas na Amazônia (2014–2024)
 dataMap = {
